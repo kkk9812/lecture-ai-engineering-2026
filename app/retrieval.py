@@ -124,18 +124,57 @@ def open_index(path: Path):
         db.close()
 
 
+
 def search(query: str) -> list[dict]:
-    """質問を埋め込み、近いページを最大RAG_TOP_K件返す。"""
+    """質問に近いページと、同じ資料の前後1ページを返す。"""
     if not isinstance(query, str) or not query.strip():
         raise ValueError("検索語が空です。")
+
     with open_index(RAG_DB) as db:
         vector = embed_text(query.strip(), "RETRIEVAL_QUERY")
         rows = db.execute("""
-            SELECT page_id, document_id, lecture, document_title, section, title, page, content,
+            SELECT page_id, document_id, lecture, document_title,
+                   section, title, page, content,
                    vec_distance_cosine(embedding, ?) AS distance
             FROM chunks ORDER BY distance, page_id LIMIT ?
         """, (sqlite_vec.serialize_float32(vector), RAG_TOP_K))
-        return [dict(row) for row in rows]
+
+        hits = [dict(row) for row in rows]
+
+        # 同じ資料内のページを参照できるようにする
+        all_pages = load_pages(RAG_SOURCE)
+        page_lookup = {
+            (page["document_id"], page["page"]): page
+            for page in all_pages
+        }
+
+        results = []
+        seen = set()
+
+        for hit in hits:
+            document_id = hit["document_id"]
+            page_number = hit["page"]
+
+            # 検索ヒットと前後1ページを取得
+            for number in (page_number - 1, page_number, page_number + 1):
+                page = page_lookup.get((document_id, number))
+
+                if page is None:
+                    continue
+
+                page_id = page["page_id"]
+
+                # 同じページを重複して追加しない
+                if page_id in seen:
+                    continue
+
+                seen.add(page_id)
+                results.append({
+                    **page,
+                    "distance": hit["distance"] if number == page_number else None,
+                })
+
+        return results
 
 
 def search_graph(query: str) -> dict:
